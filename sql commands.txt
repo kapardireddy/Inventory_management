@@ -1,0 +1,49 @@
+CREATE TABLE IF NOT EXISTS products (
+    id SERIAL PRIMARY KEY,          -- row ID
+    product_id INT NOT NULL,        -- logical product ID
+    value NUMERIC NOT NULL,         -- stock quantity
+    transaction_id SERIAL NOT NULL, -- auto-incremented purchase ID
+    created_at TIMESTAMP DEFAULT now()
+);
+
+
+
+
+CREATE TABLE IF NOT EXISTS totals (
+    product_id INT PRIMARY KEY,
+    total NUMERIC
+);
+
+
+ALTER TABLE public.products REPLICA IDENTITY FULL;
+
+SELECT * FROM products
+
+INSERT INTO products(product_id,value) VALUES (1,10);
+SELECT * FROM products
+
+SELECT * FROM totals
+
+
+INSERT INTO products (product_id, value) VALUES (1, 100);
+SELECT * FROM products
+SELECT * FROM totals
+
+INSERT INTO products (product_id, value) VALUES (2, 200);
+SELECT * FROM products
+SELECT * FROM totals
+
+INSERT INTO products (product_id, value) VALUES (2, 250);
+SELECT * FROM products
+SELECT * FROM totals
+
+
+
+UPDATE products SET value = 150 WHERE transaction_id = 2;
+SELECT * FROM products
+SELECT * FROM totals
+
+
+DELETE FROM products WHERE transaction_id = 4;
+SELECT * FROM products
+SELECT * FROM totals

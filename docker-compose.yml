@@ -1,0 +1,229 @@
+version: '3.8'
+
+services:
+
+  postgres:
+    image: debezium/postgres:13
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: test
+    volumes:
+      - ./init/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - debezium-net
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: supersecret
+    depends_on:
+      - postgres
+    networks:
+      - debezium-net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - debezium-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - debezium-net
+
+  connect-debezium:
+    image: debezium/connect:2.4
+    container_name: connect-debezium
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "8084:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect-debezium
+    networks:
+      - debezium-net
+
+  connect-mongo:
+    image: debezium/connect:2.4
+    container_name: connect-mongo
+    ports:
+      - "8085:8083"
+    depends_on:
+      - kafka
+      - mongodb
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: 2
+      CONFIG_STORAGE_TOPIC: mongo_connect_configs
+      OFFSET_STORAGE_TOPIC: mongo_connect_offsets
+      STATUS_STORAGE_TOPIC: mongo_connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect-mongo
+      CONNECT_PLUGIN_PATH: /kafka/plugins
+    volumes:
+      - ./kafka-plugins:/kafka/plugins
+    networks:
+      - debezium-net
+
+  mongodb:
+    image: mongo:6
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    networks:
+      - debezium-net
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin
+    depends_on:
+      - mongodb
+    networks:
+      - debezium-net
+
+  python-consumer:
+    build: ./products_consumer
+    container_name: python-consumer
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      PYTHONUNBUFFERED: 1
+    networks:
+      - debezium-net
+    restart: unless-stopped
+
+  totals-trigger:
+    build: ./email
+    container_name: totals-trigger
+    depends_on:
+      - kafka
+      - postgres
+      - python-consumer
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: 1
+    networks:
+      - debezium-net
+    restart: unless-stopped
+  
+  airbyte-temporal:
+    container_name: airbyte-temporal
+    image: airbyte/temporal:1.20.2
+    environment:
+      - DB=postgresql
+      - POSTGRES_USER=airbyte
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=airbyte
+      - TEMPORAL_DB=airbyte
+      - TEMPORAL_PASSWORD=password
+    ports:
+      - "7233:7233"
+    networks:
+      - debezium-net
+
+  airbyte-db:
+    image: postgres:13-alpine
+    container_name: airbyte-db
+    environment:
+      - POSTGRES_USER=airbyte
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=airbyte
+    volumes:
+      - airbyte_db_data:/var/lib/postgresql/data
+    networks:
+      - debezium-net
+
+  airbyte:
+    container_name: airbyte
+    image: airbyte/airbyte:0.50.55
+    ports:
+      - "8000:8000"
+    depends_on:
+      - airbyte-db
+      - airbyte-temporal
+    environment:
+      - AIRBYTE_ROLE=webapp
+      - CONFIG_ROOT=/data
+    volumes:
+      - airbyte_data:/data
+    networks:
+      - debezium-net
+
+
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: replica_db
+    ports:
+      - "3306:3306"
+
+
+networks:
+  debezium-net:
+    name: debezium-net
+
+volumes:
+  airbyte_data:
